@@ -113,7 +113,7 @@ verify() {
     iptables -t mangle -L -v -n | grep -A 10 "V2RAY"
     
     echo -e "${BLUE}2. TPROXY检查:${NC}"
-    iptables -t mangle -L PREROUTING -n | grep -A 5 "TPROXY"
+    iptables -t mangle -L V2RAY -n | grep TPROXY
     
     echo -e "${BLUE}3. 路由标记检查:${NC}"
     ip rule show | grep -A 3 "fwmark"
