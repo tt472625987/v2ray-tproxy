@@ -11,45 +11,52 @@ status() {
     }
 
     # 检查核心组件
+    local checks=(
+        "iptables规则链" "iptables -t mangle -L V2RAY -n >/dev/null 2>&1"
+        "TPROXY端口监听" "[ -n '$TPROXY_PORT' ] && ss -ulnp | grep -q ':$TPROXY_PORT'"
+        "路由规则" "[ -n '$FW_MARK' ] && [ -n '$ROUTE_TABLE' ] && ip rule show | grep -q 'fwmark $FW_MARK' && ip route show table $ROUTE_TABLE | grep -q 'dev lo'"
+    )
+    
     local checks_passed=0
-    local total_checks=3
-
-    # 1. 检查iptables规则链
-    iptables -t mangle -L V2RAY -n >/dev/null 2>&1 && {
-        echo "[✓] iptables规则链存在"
-        checks_passed=$((checks_passed+1))
-    } || echo "[×] iptables规则链缺失"
-
-    # 2. 检查TPROXY端口监听
-    if [ -n "$TPROXY_PORT" ]; then
-        ss -ulnp | grep -q ":$TPROXY_PORT" && {
-            echo "[✓] TPROXY端口 $TPROXY_PORT 正在监听"
-            checks_passed=$((checks_passed+1))
-        } || echo "[×] TPROXY端口 $TPROXY_PORT 未监听"
-    else
-        echo "[!] 配置中未定义TPROXY_PORT"
+    local total_checks=$((${#checks[@]}/2))
+    local traffic_stats=""
+    
+    # 获取流量统计（如果规则存在）
+    if iptables -t mangle -L V2RAY -n >/dev/null 2>&1; then
+        traffic_stats=$(iptables -t mangle -L V2RAY -nvx | awk '
+            /^Chain V2RAY/ {chain=1; next}
+            chain && /TPROXY/ {printf "↑%s包/%sB ↓", $2, $3; exit}
+            chain && /socket/ {socket=$2}
+            END {if (chain) printf " (Socket分流: %s包)", socket}'
+        )
     fi
 
-    # 3. 检查路由规则
-    if [ -n "$FW_MARK" ] && [ -n "$ROUTE_TABLE" ]; then
-        ip rule show | grep -q "fwmark $FW_MARK" && \
-        ip route show table $ROUTE_TABLE | grep -q "dev lo" && {
-            echo "[✓] 路由规则(fwmark $FW_MARK -> table $ROUTE_TABLE)存在"
+    # 执行检查
+    echo "=== 服务状态检查 ==="
+    for ((i=0; i<${#checks[@]}; i+=2)); do
+        local desc="${checks[i]}"
+        local cmd="${checks[i+1]}"
+        
+        if eval "$cmd"; then
+            echo -e "[✓] $desc"
             checks_passed=$((checks_passed+1))
-        } || echo "[×] 路由规则缺失"
-    else
-        echo "[!] 配置中未定义FW_MARK或ROUTE_TABLE"
-    fi
+        else
+            echo -e "[×] $desc"
+        fi
+    done
 
-    # 综合状态判断
+    # 显示综合状态
+    echo -e "\n=== 综合状态 ==="
     if [ $checks_passed -eq $total_checks ]; then
-        echo "状态: 运行正常 (所有 $total_checks 项检查通过)"
+        echo -e "${GREEN}运行正常${NC} (所有 $total_checks 项检查通过)"
+        [ -n "$traffic_stats" ] && echo -e "流量统计: $traffic_stats"
         return 0
     elif [ $checks_passed -gt 0 ]; then
-        echo "状态: 部分运行 ($checks_passed/$total_checks 项检查通过)"
+        echo -e "${YELLOW}部分运行${NC} ($checks_passed/$total_checks 项检查通过)"
+        [ -n "$traffic_stats" ] && echo -e "流量统计: $traffic_stats"
         return 2
     else
-        echo "状态: 未运行"
+        echo -e "${RED}未运行${NC}"
         return 1
     fi
 }
