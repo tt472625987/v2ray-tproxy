@@ -2,7 +2,13 @@
 START=95  # 在网络初始化后执行
 USE_PROCD=0  # 禁用 procd 管理
 
-# 新增状态检测函数
+# 定义颜色（兼容ash）
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# 新增状态检测函数（兼容ash语法）
 status() {
     # 加载配置文件获取变量
     [ -f "/home/v2ray-tproxy/config.conf" ] && . /home/v2ray-tproxy/config.conf || {
@@ -10,19 +16,14 @@ status() {
         return 1
     }
 
-    # 检查核心组件
-    local checks=(
-        "iptables规则链" "iptables -t mangle -L V2RAY -n >/dev/null 2>&1"
-        "TPROXY端口监听" "[ -n '$TPROXY_PORT' ] && ss -ulnp | grep -q ':$TPROXY_PORT'"
-        "路由规则" "[ -n '$FW_MARK' ] && [ -n '$ROUTE_TABLE' ] && ip rule show | grep -q 'fwmark $FW_MARK' && ip route show table $ROUTE_TABLE | grep -q 'dev lo'"
-    )
-    
-    local checks_passed=0
-    local total_checks=$((${#checks[@]}/2))
+    # 初始化检查结果
+    local rules_ok=0 port_ok=0 route_ok=0
     local traffic_stats=""
-    
-    # 获取流量统计（如果规则存在）
+
+    # 1. 检查iptables规则链
     if iptables -t mangle -L V2RAY -n >/dev/null 2>&1; then
+        rules_ok=1
+        # 获取流量统计
         traffic_stats=$(iptables -t mangle -L V2RAY -nvx | awk '
             /^Chain V2RAY/ {chain=1; next}
             chain && /TPROXY/ {printf "↑%s包/%sB ↓", $2, $3; exit}
@@ -31,28 +32,43 @@ status() {
         )
     fi
 
-    # 执行检查
-    echo "=== 服务状态检查 ==="
-    for ((i=0; i<${#checks[@]}; i+=2)); do
-        local desc="${checks[i]}"
-        local cmd="${checks[i+1]}"
-        
-        if eval "$cmd"; then
-            echo -e "[✓] $desc"
-            checks_passed=$((checks_passed+1))
-        else
-            echo -e "[×] $desc"
+    # 2. 检查TPROXY端口监听
+    if [ -n "$TPROXY_PORT" ]; then
+        if ss -ulnp | grep -q ":$TPROXY_PORT"; then
+            port_ok=1
         fi
-    done
+    fi
 
-    # 显示综合状态
+    # 3. 检查路由规则
+    if [ -n "$FW_MARK" ] && [ -n "$ROUTE_TABLE" ]; then
+        if ip rule show | grep -q "fwmark $FW_MARK" && \
+           ip route show table $ROUTE_TABLE | grep -q "dev lo"; then
+            route_ok=1
+        fi
+    fi
+
+    # 显示检查结果
+    echo "=== 服务状态检查 ==="
+    [ $rules_ok -eq 1 ] && echo "[✓] iptables规则链" || echo "[×] iptables规则链"
+    if [ -n "$TPROXY_PORT" ]; then
+        [ $port_ok -eq 1 ] && echo "[✓] TPROXY端口 $TPROXY_PORT 监听" || echo "[×] TPROXY端口 $TPROXY_PORT 未监听"
+    else
+        echo "[!] 配置中未定义TPROXY_PORT"
+    fi
+    if [ -n "$FW_MARK" ] && [ -n "$ROUTE_TABLE" ]; then
+        [ $route_ok -eq 1 ] && echo "[✓] 路由规则(fwmark $FW_MARK -> table $ROUTE_TABLE)" || echo "[×] 路由规则缺失"
+    else
+        echo "[!] 配置中未定义FW_MARK或ROUTE_TABLE"
+    fi
+
+    # 综合状态判断
     echo -e "\n=== 综合状态 ==="
-    if [ $checks_passed -eq $total_checks ]; then
-        echo -e "${GREEN}运行正常${NC} (所有 $total_checks 项检查通过)"
+    if [ $rules_ok -eq 1 ] && [ $port_ok -eq 1 ] && [ $route_ok -eq 1 ]; then
+        echo -e "${GREEN}运行正常${NC} (所有检查通过)"
         [ -n "$traffic_stats" ] && echo -e "流量统计: $traffic_stats"
         return 0
-    elif [ $checks_passed -gt 0 ]; then
-        echo -e "${YELLOW}部分运行${NC} ($checks_passed/$total_checks 项检查通过)"
+    elif [ $rules_ok -eq 1 ] || [ $port_ok -eq 1 ] || [ $route_ok -eq 1 ]; then
+        echo -e "${YELLOW}部分运行${NC}"
         [ -n "$traffic_stats" ] && echo -e "流量统计: $traffic_stats"
         return 2
     else
@@ -68,8 +84,7 @@ start() {
         exit 1
     }
 
-
-    # 等待网络就绪（改进版）
+    # 等待网络就绪
     echo "[v2ray-tproxy] 等待网络就绪..."
     local max_retry=10
     while [ $max_retry -gt 0 ]; do
