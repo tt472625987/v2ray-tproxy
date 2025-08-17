@@ -59,8 +59,13 @@ echo "=== 服务状态 ==="
 /etc/init.d/$SERVICE_NAME status
 echo "=== 最新日志 ==="
 logread | grep "$SERVICE_NAME" | tail -n 5
-echo "=== 规则检查 ==="
-iptables -t mangle -L PREROUTING -n --line-numbers | head -n 15
-ip rule list | grep "$SERVICE_NAME"
+echo "=== 详细规则检查 ==="
+iptables -t mangle -L -v -n
+echo "=== TPROXY检查 ==="
+iptables -t mangle -L PREROUTING -n | grep TPROXY
+echo "=== 路由标记检查 ==="
+ip rule show | grep fwmark
+echo "=== 路由表检查 ==="
+ip route show table $ROUTE_TABLE
 
 echo "[SUCCESS] 部署完成！"
