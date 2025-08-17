@@ -1,6 +1,6 @@
 #!/bin/bash
-# 一键部署脚本路径：/home/v2ray-tproxy/deploy.sh
-# 用法：./deploy.sh [git_repo_url] (首次部署需提供git地址)
+# 纯净部署脚本路径：/home/v2ray-tproxy/deploy.sh
+# 用法：./deploy.sh
 
 # 颜色定义
 RED='\033[0;31m'
@@ -27,45 +27,38 @@ precheck() {
     }
 
     # 检查必要命令
-    for cmd in git iptables ip ss; do
+    for cmd in iptables ip ss; do
         if ! command -v "$cmd" >/dev/null; then
             echo -e "${RED}错误：缺少必要命令 '$cmd'${NC}"
             exit 1
         fi
     done
+
+    # 检查安装目录是否存在
+    [ -d "$INSTALL_DIR" ] || {
+        echo -e "${RED}错误：安装目录 $INSTALL_DIR 不存在${NC}"
+        exit 1
+    }
     echo -e "${GREEN}[✓] 环境检查通过${NC}"
 }
 
 # 部署函数
 deploy() {
-    # 首次部署处理
-    if [ -n "$1" ] && [ ! -d "$INSTALL_DIR/.git" ]; then
-        echo -e "${BLUE}[INFO] 首次部署，正在克隆仓库...${NC}"
-        git clone "$1" "$INSTALL_DIR" || {
-            echo -e "${RED}[ERROR] Git克隆失败！${NC}"
-            exit 1
-        }
-    fi
-
     # 进入目录
     cd "$INSTALL_DIR" || {
         echo -e "${RED}[ERROR] 无法进入目录 $INSTALL_DIR${NC}"
         exit 1
     }
 
-    # 更新代码
-    if [ -d .git ]; then
-        echo -e "${BLUE}[INFO] 拉取最新代码...${NC}"
-        git pull || {
-            echo -e "${YELLOW}[WARN] Git拉取失败，继续使用现有代码${NC}"
-        }
-    fi
-
     # 设置文件权限
     echo -e "${BLUE}[INFO] 设置文件权限...${NC}"
-    chmod 755 v2ray-tproxy.init
+    chmod 755 v2ray-tproxy.init 2>/dev/null || {
+        echo -e "${YELLOW}[WARN] v2ray-tproxy.init 文件不存在${NC}"
+    }
     [ -d rules.d ] && chmod 644 rules.d/*.conf
-    [ -f config.conf ] && chmod 644 config.conf
+    [ -f config.conf ] && chmod 644 config.conf || {
+        echo -e "${YELLOW}[WARN] config.conf 文件不存在${NC}"
+    }
 }
 
 # 服务管理函数
@@ -135,7 +128,7 @@ verify() {
 # 主流程
 main() {
     precheck
-    deploy "$@"
+    deploy
     service_control
     verify
     
