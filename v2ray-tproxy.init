@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-START=50  # 在网络初始化后执行
+START=95  # 在网络初始化后执行
 USE_PROCD=0  # 禁用 procd 管理
 
 # 新增状态检测函数
