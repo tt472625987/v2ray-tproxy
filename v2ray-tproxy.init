@@ -1,30 +1,30 @@
 #!/bin/sh /etc/rc.common
-START=50
-USE_PROCD=1
+START=50  # 在网络初始化后执行
+USE_PROCD=0  # 禁用 procd 管理
 
-CONFIG_DIR="/home/v2ray-tproxy"
-RULES_DIR="$CONFIG_DIR/rules.d"
+start() {
+    # 加载配置
+    . /home/v2ray-tproxy/config.conf
 
-start_service() {
-    # 等待网络就绪
-    . $CONFIG_DIR/config.conf
-    while ! ping -c1 $TEST_IP &>/dev/null; do
+    # 等待网络就绪（关键添加！）
+    echo "[v2ray-tproxy] 等待网络就绪..."
+    while ! ping -c1 -W 1 "$TEST_IP" &>/dev/null; do
         sleep 2
     done
 
-    # 按顺序加载规则片段
-    for rule_file in $RULES_DIR/*.conf; do
-        [ -f "$rule_file" ] && {
-            logger -t v2ray-tproxy "Loading rules: $(basename $rule_file)"
-            sh "$rule_file"
-        }
+    # 按顺序加载规则
+    for rule in /home/v2ray-tproxy/rules.d/*.conf; do
+        if [ -f "$rule" ]; then
+            echo "[v2ray-tproxy] 加载规则: $(basename "$rule")"
+            sh "$rule"
+        fi
     done
 
-    logger -t v2ray-tproxy "TPROXY rules applied (Port: $TPROXY_PORT)"
+    logger -t v2ray-tproxy "规则加载完成 (Mark: $MARK_VALUE)"
 }
 
-stop_service() {
-    # 直接调用清理脚本
-    sh $RULES_DIR/10-cleanup.conf
-    logger -t v2ray-tproxy "TPROXY rules removed"
+stop() {
+    # 清理规则
+    sh /home/v2ray-tproxy/rules.d/10-cleanup.conf
+    logger -t v2ray-tproxy "规则已清除"
 }
