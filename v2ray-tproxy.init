@@ -2,29 +2,93 @@
 START=50  # 在网络初始化后执行
 USE_PROCD=0  # 禁用 procd 管理
 
+# 新增状态检测函数
+status() {
+    # 加载配置文件获取变量
+    [ -f "/home/v2ray-tproxy/config.conf" ] && . /home/v2ray-tproxy/config.conf || {
+        echo "Config file missing"
+        return 1
+    }
+
+    # 检查核心组件
+    local checks_passed=0
+    local total_checks=3
+
+    # 1. 检查iptables规则链
+    iptables -t mangle -L V2RAY -n >/dev/null 2>&1 && {
+        echo "[✓] iptables规则链存在"
+        checks_passed=$((checks_passed+1))
+    } || echo "[×] iptables规则链缺失"
+
+    # 2. 检查TPROXY端口监听
+    if [ -n "$TPROXY_PORT" ]; then
+        ss -ulnp | grep -q ":$TPROXY_PORT" && {
+            echo "[✓] TPROXY端口 $TPROXY_PORT 正在监听"
+            checks_passed=$((checks_passed+1))
+        } || echo "[×] TPROXY端口 $TPROXY_PORT 未监听"
+    else
+        echo "[!] 配置中未定义TPROXY_PORT"
+    fi
+
+    # 3. 检查路由规则
+    if [ -n "$FW_MARK" ] && [ -n "$ROUTE_TABLE" ]; then
+        ip rule show | grep -q "fwmark $FW_MARK" && \
+        ip route show table $ROUTE_TABLE | grep -q "dev lo" && {
+            echo "[✓] 路由规则(fwmark $FW_MARK -> table $ROUTE_TABLE)存在"
+            checks_passed=$((checks_passed+1))
+        } || echo "[×] 路由规则缺失"
+    else
+        echo "[!] 配置中未定义FW_MARK或ROUTE_TABLE"
+    fi
+
+    # 综合状态判断
+    if [ $checks_passed -eq $total_checks ]; then
+        echo "状态: 运行正常 (所有 $total_checks 项检查通过)"
+        return 0
+    elif [ $checks_passed -gt 0 ]; then
+        echo "状态: 部分运行 ($checks_passed/$total_checks 项检查通过)"
+        return 2
+    else
+        echo "状态: 未运行"
+        return 1
+    fi
+}
+
 start() {
     # 加载配置
-    . /home/v2ray-tproxy/config.conf
+    . /home/v2ray-tproxy/config.conf || {
+        logger -t v2ray-tproxy "错误：无法加载配置文件"
+        exit 1
+    }
 
-    # 等待网络就绪（关键添加！）
+
+    # 等待网络就绪（改进版）
     echo "[v2ray-tproxy] 等待网络就绪..."
-    while ! ping -c1 -W 1 "$TEST_IP" &>/dev/null; do
-        sleep 2
+    local max_retry=10
+    while [ $max_retry -gt 0 ]; do
+        if ping -c1 -W2 "$TEST_IP" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 3
+        max_retry=$((max_retry-1))
     done
+    [ $max_retry -le 0 ] && logger -t v2ray-tproxy "警告：网络检测超时"
 
     # 按顺序加载规则
     for rule in /home/v2ray-tproxy/rules.d/*.conf; do
         if [ -f "$rule" ]; then
             echo "[v2ray-tproxy] 加载规则: $(basename "$rule")"
-            sh "$rule"
+            sh "$rule" || logger -t v2ray-tproxy "规则加载失败: $(basename "$rule")"
         fi
     done
 
-    logger -t v2ray-tproxy "规则加载完成 (Mark: $MARK_VALUE)"
+    logger -t v2ray-tproxy "启动完成 (Mark: ${MARK_VALUE:-未设置})"
 }
 
 stop() {
     # 清理规则
-    sh /home/v2ray-tproxy/rules.d/10-cleanup.conf
-    logger -t v2ray-tproxy "规则已清除"
+    [ -f "/home/v2ray-tproxy/rules.d/10-cleanup.conf" ] && {
+        sh /home/v2ray-tproxy/rules.d/10-cleanup.conf
+        logger -t v2ray-tproxy "规则已清除"
+    } || logger -t v2ray-tproxy "错误：清理脚本不存在"
 }

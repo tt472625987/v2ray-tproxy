@@ -1,71 +1,146 @@
-#!/bin/sh
+#!/bin/bash
 # 一键部署脚本路径：/home/v2ray-tproxy/deploy.sh
-# 用法：sh deploy.sh [git_repo_url] (首次部署需提供git地址)
+# 用法：./deploy.sh [git_repo_url] (首次部署需提供git地址)
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
 # 配置参数
 SERVICE_NAME="v2ray-tproxy"
 INSTALL_DIR="/home/v2ray-tproxy"
 SERVICE_LINK="/etc/init.d/$SERVICE_NAME"
+CONFIG_FILE="$INSTALL_DIR/config.conf"
+LOG_IDENTIFIER="v2ray-tproxy"
 
-# 检查是否首次部署
-if [ -n "$1" ] && [ ! -d "$INSTALL_DIR/.git" ]; then
-    echo "[INFO] 首次部署，正在克隆仓库..."
-    git clone "$1" "$INSTALL_DIR" || {
-        echo "[ERROR] Git克隆失败！"
+# 预检查函数
+precheck() {
+    echo -e "${BLUE}[PRE-CHECK] 运行环境检查...${NC}"
+    
+    # 检查root权限
+    [ "$(id -u)" -eq 0 ] || {
+        echo -e "${RED}错误：需要root权限执行此脚本${NC}"
         exit 1
     }
-fi
 
-# 进入目录
-cd "$INSTALL_DIR" || {
-    echo "[ERROR] 无法进入目录 $INSTALL_DIR"
-    exit 1
+    # 检查必要命令
+    for cmd in git iptables ip ss; do
+        if ! command -v "$cmd" >/dev/null; then
+            echo -e "${RED}错误：缺少必要命令 '$cmd'${NC}"
+            exit 1
+        fi
+    done
+    echo -e "${GREEN}[✓] 环境检查通过${NC}"
 }
 
-# 更新代码（如果已克隆）
-if [ -d .git ]; then
-    echo "[INFO] 拉取最新代码..."
-    git pull || {
-        echo "[WARN] Git拉取失败，继续使用现有代码"
+# 部署函数
+deploy() {
+    # 首次部署处理
+    if [ -n "$1" ] && [ ! -d "$INSTALL_DIR/.git" ]; then
+        echo -e "${BLUE}[INFO] 首次部署，正在克隆仓库...${NC}"
+        git clone "$1" "$INSTALL_DIR" || {
+            echo -e "${RED}[ERROR] Git克隆失败！${NC}"
+            exit 1
+        }
+    fi
+
+    # 进入目录
+    cd "$INSTALL_DIR" || {
+        echo -e "${RED}[ERROR] 无法进入目录 $INSTALL_DIR${NC}"
+        exit 1
     }
-fi
 
-# 设置文件权限
-echo "[INFO] 设置文件权限..."
-chmod 755 v2ray-tproxy.init
-chmod 644 rules.d/*.conf
-chmod 644 config.conf
+    # 更新代码
+    if [ -d .git ]; then
+        echo -e "${BLUE}[INFO] 拉取最新代码...${NC}"
+        git pull || {
+            echo -e "${YELLOW}[WARN] Git拉取失败，继续使用现有代码${NC}"
+        }
+    fi
 
-# 注册服务
-echo "[INFO] 注册服务..."
-if [ -L "$SERVICE_LINK" ]; then
-    echo "[DEBUG] 移除旧服务链接..."
-    rm -f "$SERVICE_LINK"
-fi
-ln -sf "$INSTALL_DIR/v2ray-tproxy.init" "$SERVICE_LINK"
+    # 设置文件权限
+    echo -e "${BLUE}[INFO] 设置文件权限...${NC}"
+    chmod 755 v2ray-tproxy.init
+    [ -d rules.d ] && chmod 644 rules.d/*.conf
+    [ -f config.conf ] && chmod 644 config.conf
+}
 
-# 启用开机启动
-echo "[INFO] 设置开机启动..."
-/etc/init.d/$SERVICE_NAME enable
+# 服务管理函数
+service_control() {
+    echo -e "${BLUE}[INFO] 注册服务...${NC}"
+    # 移除旧链接
+    [ -L "$SERVICE_LINK" ] && {
+        echo -e "${YELLOW}[DEBUG] 移除旧服务链接...${NC}"
+        rm -f "$SERVICE_LINK"
+    }
+    
+    # 创建新链接
+    ln -sf "$INSTALL_DIR/v2ray-tproxy.init" "$SERVICE_LINK" || {
+        echo -e "${RED}[ERROR] 服务链接创建失败${NC}"
+        exit 1
+    }
 
-# 启动服务
-echo "[INFO] 启动服务..."
-/etc/init.d/$SERVICE_NAME restart
+    # 启用服务
+    echo -e "${BLUE}[INFO] 设置开机启动...${NC}"
+    /etc/init.d/$SERVICE_NAME enable || {
+        echo -e "${YELLOW}[WARN] 开机启动设置失败${NC}"
+    }
 
-# 测试功能
-echo "[INFO] 运行测试..."
-sleep 3
-echo "=== 服务状态 ==="
-/etc/init.d/$SERVICE_NAME status
-echo "=== 最新日志 ==="
-logread | grep "$SERVICE_NAME" | tail -n 5
-echo "=== 详细规则检查 ==="
-iptables -t mangle -L -v -n
-echo "=== TPROXY检查 ==="
-iptables -t mangle -L PREROUTING -n | grep TPROXY
-echo "=== 路由标记检查 ==="
-ip rule show | grep fwmark
-echo "=== 路由表检查 ==="
-ip route show table $ROUTE_TABLE
+    # 启动服务
+    echo -e "${BLUE}[INFO] 启动服务...${NC}"
+    /etc/init.d/$SERVICE_NAME restart
+}
 
-echo "[SUCCESS] 部署完成！"
+# 验证函数
+verify() {
+    echo -e "${BLUE}[INFO] 运行验证测试...${NC}"
+    sleep 3
+
+    # 加载配置变量
+    [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE" || {
+        echo -e "${RED}[ERROR] 无法加载配置文件${NC}"
+        exit 1
+    }
+
+    # 服务状态检查
+    echo -e "${YELLOW}=== 服务状态 ===${NC}"
+    /etc/init.d/$SERVICE_NAME status
+
+    # 日志检查
+    echo -e "${YELLOW}=== 最新日志 (最后5条) ===${NC}"
+    logread | grep "$LOG_IDENTIFIER" | tail -n 5
+
+    # 深度检查
+    echo -e "${YELLOW}=== 深度检查 ===${NC}"
+    
+    echo -e "${BLUE}1. iptables规则检查:${NC}"
+    iptables -t mangle -L -v -n | grep -A 10 "V2RAY"
+    
+    echo -e "${BLUE}2. TPROXY检查:${NC}"
+    iptables -t mangle -L PREROUTING -n | grep -A 5 "TPROXY"
+    
+    echo -e "${BLUE}3. 路由标记检查:${NC}"
+    ip rule show | grep -A 3 "fwmark"
+    
+    echo -e "${BLUE}4. 路由表检查:${NC}"
+    [ -n "$ROUTE_TABLE" ] && ip route show table "${ROUTE_TABLE:-100}"
+    
+    echo -e "${BLUE}5. 端口监听检查:${NC}"
+    [ -n "$TPROXY_PORT" ] && ss -ulnp | grep -w "${TPROXY_PORT:-12345}"
+}
+
+# 主流程
+main() {
+    precheck
+    deploy "$@"
+    service_control
+    verify
+    
+    echo -e "${GREEN}[SUCCESS] 部署成功完成！${NC}"
+    echo -e "建议手动测试访问：curl --connect-timeout 5 -v https://www.google.com"
+}
+
+main "$@"
