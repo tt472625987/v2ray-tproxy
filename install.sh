@@ -132,11 +132,12 @@ for subnet in \
 	224.0.0.0/4 240.0.0.0/4; do
 	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
 done
-[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
+	[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
 
 # 创建并填充 V2RAY（仅 TCP，UDP 可选，IPv4）
 iptables -t mangle -N V2RAY 2>/dev/null || true
 iptables -t mangle -F V2RAY 2>/dev/null || true
+iptables -t mangle -A V2RAY_EXCLUDE -j V2RAY
 
 # 可选：限速日志，避免刷屏（需要 LOG 目标支持）
 if [ -n "$LOG_PREFIX" ]; then
@@ -152,9 +153,8 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 	iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 fi
 
-# 将 EXCLUDE 挂到最前，再将 V2RAY 追加到 PREROUTING（IPv4）
+# 将 EXCLUDE 挂到最前（IPv4，V2RAY_EXCLUDE 内部跳转到 V2RAY）
 iptables -t mangle -I PREROUTING 1 -j V2RAY_EXCLUDE
-iptables -t mangle -A PREROUTING -j V2RAY
 
 # IPv6（可选，需 ENABLE_IPV6=1 且 ip6tables 可用）
 if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
@@ -173,7 +173,8 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$subnet6" -j RETURN
 	done
 	[ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN
-	# 可选日志
+ip6tables -t mangle -A V2RAY6_EXCLUDE -j V2RAY6
+# 可选日志
 	if [ -n "$LOG_PREFIX" ]; then
 		ip6tables -t mangle -A V2RAY6 -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
 	fi
@@ -183,12 +184,16 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	fi
 	# 挂载到 PREROUTING（IPv6）
-	ip6tables -t mangle -I PREROUTING 1 -j V2RAY6_EXCLUDE
-	ip6tables -t mangle -A PREROUTING -j V2RAY6
+ip6tables -t mangle -I PREROUTING 1 -j V2RAY6_EXCLUDE
 fi
 
 # 策略路由：fwmark -> table（IPv4，IPv6 路由策略需另行按需配置）
 if [ -n "$MARK" ] && [ -n "$ROUTE_TABLE" ]; then
+	# 防御：局域网目的走 main，避免本机输出流量误入 TPROXY 表
+	[ -n "$LOCAL_SUBNET" ] && {
+		ip rule del to "$LOCAL_SUBNET" lookup main 2>/dev/null
+		ip rule add pref 99 to "$LOCAL_SUBNET" lookup main 2>/dev/null
+	}
 	ip rule del fwmark "$MARK" table "$ROUTE_TABLE" 2>/dev/null
 	ip route flush table "$ROUTE_TABLE" 2>/dev/null
 	ip rule add pref 100 fwmark "$MARK" lookup "$ROUTE_TABLE" 2>/dev/null
