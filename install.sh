@@ -1,0 +1,272 @@
+#!/bin/sh
+
+# Unified installer for v2ray-tproxy via firewall include
+# Usage: sh install.sh
+
+# Colors (optional)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Resolve script directory
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+CONFIG_SRC="$SCRIPT_DIR/config.conf"
+CONFIG_DST="/etc/v2ray-tproxy.conf"
+FW_INCLUDE="/etc/firewall.v2ray"
+
+say() { echo "$1"; }
+ok() { echo "${GREEN}[✓]${NC} $1"; }
+warn() { echo "${YELLOW}[WARN]${NC} $1"; }
+err() { echo "${RED}[ERROR]${NC} $1"; }
+
+require_root() {
+	[ "$(id -u)" -eq 0 ] || { err "需要 root 权限"; exit 1; }
+}
+
+precheck() {
+	say "${BLUE}[PRE-CHECK] 检查系统依赖...${NC}"
+	# BusyBox ash 环境下尽量少依赖
+	for cmd in uci iptables ip iptables-save sh; do
+		command -v "$cmd" >/dev/null 2>&1 || { err "缺少命令: $cmd"; exit 1; }
+	done
+	# 透明代理内核模块通常需要：xt_TPROXY、xt_socket
+	# 这里只提示，不强制退出
+	lsmod 2>/dev/null | grep -Eq '\bxt_TPROXY\b' || warn "未检测到 xt_TPROXY 模块，若规则失败请安装相应内核模块"
+	lsmod 2>/dev/null | grep -Eq '\bxt_socket\b' || warn "未检测到 xt_socket 模块，若规则失败请安装相应内核模块"
+	ok "依赖检查完成"
+}
+
+check_after_config() {
+	# 根据配置给出更具体的提示（如 IPv6 开启但缺 ip6tables）
+	[ -f "$CONFIG_DST" ] && . "$CONFIG_DST"
+	# 统一计算 MARK 以做基本校验
+	MARK_COMPUTED="${FW_MARK:-$MARK_VALUE}"
+	if [ -z "${TPROXY_PORT:-}" ] || [ -z "${MARK_COMPUTED:-}" ]; then
+		warn "未设置 TPROXY_PORT 或 FW_MARK/MARK_VALUE，透明代理规则可能不生效"
+	fi
+	if [ "${ENABLE_IPV6:-0}" = "1" ]; then
+		if ! command -v ip6tables >/dev/null 2>&1; then
+			warn "检测到 ENABLE_IPV6=1，但系统缺少 ip6tables，IPv6 规则将无法应用"
+		fi
+	fi
+}
+
+install_config() {
+	if [ -f "$CONFIG_SRC" ]; then
+		if [ -f "$CONFIG_DST" ]; then
+			# 如果目标存在但不同，做一次备份
+			if ! cmp -s "$CONFIG_SRC" "$CONFIG_DST" 2>/dev/null; then
+				cp -f "$CONFIG_DST" "$CONFIG_DST.bak" 2>/dev/null && warn "已备份现有配置到 $CONFIG_DST.bak"
+				cp -f "$CONFIG_SRC" "$CONFIG_DST" || { err "复制配置失败"; exit 1; }
+				ok "更新配置到 $CONFIG_DST"
+			else
+				ok "配置已是最新 ($CONFIG_DST)"
+			fi
+		else
+			cp -f "$CONFIG_SRC" "$CONFIG_DST" || { err "复制配置失败"; exit 1; }
+			ok "安装配置到 $CONFIG_DST"
+		fi
+	else
+		warn "未找到仓库内配置 $CONFIG_SRC，继续使用已存在的 $CONFIG_DST（若有）"
+	fi
+}
+
+write_fw_include() {
+	cat > "$FW_INCLUDE" <<'EOF'
+#!/bin/sh
+# firewall include for v2ray-tproxy (iptables)
+
+CONFIG_FILE="/etc/v2ray-tproxy.conf"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+# 统一 fwmark：优先使用 FW_MARK；若为空兼容旧 MARK_VALUE
+MARK="${FW_MARK:-$MARK_VALUE}"
+
+# 清理旧规则（幂等）
+# 先从 PREROUTING 移除挂载点，再删除自定义链（IPv4）
+iptables -t mangle -D PREROUTING -j V2RAY 2>/dev/null
+iptables -t mangle -D PREROUTING -j V2RAY_EXCLUDE 2>/dev/null
+iptables -t mangle -F V2RAY 2>/dev/null
+iptables -t mangle -X V2RAY 2>/dev/null
+iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null
+iptables -t mangle -X V2RAY_EXCLUDE 2>/dev/null
+iptables -t mangle -F DIVERT 2>/dev/null
+iptables -t mangle -X DIVERT 2>/dev/null
+
+# IPv6 清理（按需，若 ip6tables 可用）。同时清理旧命名和新命名链。
+if command -v ip6tables >/dev/null 2>&1; then
+	# 新命名
+	ip6tables -t mangle -D PREROUTING -j V2RAY6 2>/dev/null
+	ip6tables -t mangle -D PREROUTING -j V2RAY6_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -F V2RAY6 2>/dev/null
+	ip6tables -t mangle -X V2RAY6 2>/dev/null
+	ip6tables -t mangle -F V2RAY6_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -X V2RAY6_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -F DIVERT6 2>/dev/null
+	ip6tables -t mangle -X DIVERT6 2>/dev/null
+	# 兼容旧命名（若之前使用过 V2RAY/V2RAY_EXCLUDE/DIVERT）
+	ip6tables -t mangle -D PREROUTING -j V2RAY 2>/dev/null
+	ip6tables -t mangle -D PREROUTING -j V2RAY_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -F V2RAY 2>/dev/null
+	ip6tables -t mangle -X V2RAY 2>/dev/null
+	ip6tables -t mangle -F V2RAY_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -X V2RAY_EXCLUDE 2>/dev/null
+	ip6tables -t mangle -F DIVERT 2>/dev/null
+	ip6tables -t mangle -X DIVERT 2>/dev/null
+fi
+
+# 创建并填充 DIVERT 链（IPv4）
+iptables -t mangle -N DIVERT 2>/dev/null || true
+iptables -t mangle -F DIVERT 2>/dev/null || true
+[ -n "$MARK" ] && iptables -t mangle -A DIVERT -j MARK --set-mark "$MARK"
+iptables -t mangle -A DIVERT -j ACCEPT
+
+# 创建并填充 V2RAY_EXCLUDE（先排除再导流，IPv4）
+iptables -t mangle -N V2RAY_EXCLUDE 2>/dev/null || true
+iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null || true
+for subnet in \
+	0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 \
+	169.254.0.0/16 172.16.0.0/12 \
+	224.0.0.0/4 240.0.0.0/4; do
+	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
+done
+[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
+
+# 创建并填充 V2RAY（仅 TCP，UDP 可选，IPv4）
+iptables -t mangle -N V2RAY 2>/dev/null || true
+iptables -t mangle -F V2RAY 2>/dev/null || true
+
+# 可选：限速日志，避免刷屏（需要 LOG 目标支持）
+if [ -n "$LOG_PREFIX" ]; then
+	iptables -t mangle -A V2RAY -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
+fi
+
+# TCP 透明代理（优先基于 socket 匹配做旁路）
+iptables -t mangle -A V2RAY -p tcp -m socket -j DIVERT 2>/dev/null || true
+[ -n "$TPROXY_PORT" ] && [ -n "$MARK" ] && iptables -t mangle -A V2RAY -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+
+# UDP（可选）
+if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
+	iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+fi
+
+# 将 EXCLUDE 挂到最前，再将 V2RAY 追加到 PREROUTING（IPv4）
+iptables -t mangle -I PREROUTING 1 -j V2RAY_EXCLUDE
+iptables -t mangle -A PREROUTING -j V2RAY
+
+# IPv6（可选，需 ENABLE_IPV6=1 且 ip6tables 可用）
+if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
+	# 创建链（IPv6 使用独立命名：V2RAY6 / V2RAY6_EXCLUDE / DIVERT6）
+	ip6tables -t mangle -N V2RAY6 2>/dev/null || true
+	ip6tables -t mangle -F V2RAY6 2>/dev/null || true
+	ip6tables -t mangle -N V2RAY6_EXCLUDE 2>/dev/null || true
+	ip6tables -t mangle -F V2RAY6_EXCLUDE 2>/dev/null || true
+	ip6tables -t mangle -N DIVERT6 2>/dev/null || true
+	ip6tables -t mangle -F DIVERT6 2>/dev/null || true
+	[ -n "$MARK" ] && ip6tables -t mangle -A DIVERT6 -j MARK --set-mark "$MARK"
+	ip6tables -t mangle -A DIVERT6 -j ACCEPT
+	# 排除常见 IPv6 保留/本地段
+	for subnet6 in \
+		::1/128 fe80::/10 fc00::/7 ff00::/8; do
+		ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$subnet6" -j RETURN
+	done
+	[ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN
+	# 可选日志
+	if [ -n "$LOG_PREFIX" ]; then
+		ip6tables -t mangle -A V2RAY6 -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
+	fi
+	# TCP/UDP TPROXY（IPv6）
+	[ -n "$TPROXY_PORT" ] && [ -n "$MARK" ] && ip6tables -t mangle -A V2RAY6 -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+	if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
+		ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+	fi
+	# 挂载到 PREROUTING（IPv6）
+	ip6tables -t mangle -I PREROUTING 1 -j V2RAY6_EXCLUDE
+	ip6tables -t mangle -A PREROUTING -j V2RAY6
+fi
+
+# 策略路由：fwmark -> table（IPv4，IPv6 路由策略需另行按需配置）
+if [ -n "$MARK" ] && [ -n "$ROUTE_TABLE" ]; then
+	ip rule del fwmark "$MARK" table "$ROUTE_TABLE" 2>/dev/null
+	ip route flush table "$ROUTE_TABLE" 2>/dev/null
+	ip rule add pref 100 fwmark "$MARK" lookup "$ROUTE_TABLE" 2>/dev/null
+	ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
+fi
+
+exit 0
+EOF
+	chmod 755 "$FW_INCLUDE" || true
+	ok "写入 $FW_INCLUDE"
+}
+
+register_fw_include() {
+	# 避免重复添加 include
+	if uci show firewall 2>/dev/null | grep -q "firewall\.@include\[[0-9]\+\]\.path='/etc/firewall.v2ray'"; then
+		ok "Firewall include 已存在"
+	else
+		say "注册 firewall include..."
+		uci add firewall include >/dev/null
+		uci set firewall.@include[-1].type='script'
+		uci set firewall.@include[-1].path='/etc/firewall.v2ray'
+		uci set firewall.@include[-1].reload='1'
+		uci set firewall.@include[-1].enabled='1'
+		uci commit firewall
+		ok "已注册 firewall include"
+	fi
+
+	# 重新加载防火墙
+	/etc/init.d/firewall reload >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1 || true
+	ok "Firewall 已重载"
+}
+
+cleanup_old_service() {
+	# 停用并移除旧的 init 方式（如果存在）
+	if [ -x /etc/init.d/v2ray-tproxy ]; then
+		/etc/init.d/v2ray-tproxy stop >/dev/null 2>&1 || true
+		/etc/init.d/v2ray-tproxy disable >/dev/null 2>&1 || true
+		ok "已停用旧 init 服务 v2ray-tproxy"
+	fi
+}
+
+verify() {
+	# 加载配置以便显示更准确的信息
+	[ -f "$CONFIG_DST" ] && . "$CONFIG_DST"
+	say "${BLUE}[VERIFY] 规则与路由状态...${NC}"
+	say "[VERIFY] iptables-save (grep V2RAY|DIVERT)"
+	iptables-save 2>/dev/null | grep -E 'mangle|V2RAY|DIVERT' | sed 's/^/[iptables] /' | head -n 100 || true
+	say "[VERIFY] iptables -t mangle -S (完整顺序)"
+	iptables -t mangle -S 2>/dev/null | sed 's/^/[mangle-S] /' | head -n 120 || true
+	say "[VERIFY] mangle/V2RAY (简表)"
+	iptables -t mangle -L V2RAY -v -n 2>/dev/null | sed 's/^/[mangle] /' | head -n 50 || true
+	if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
+		say "[VERIFY] ip6tables-save (grep V2RAY6|DIVERT6)"
+		ip6tables-save 2>/dev/null | grep -E 'mangle|V2RAY6|DIVERT6' | sed 's/^/[ip6tables] /' | head -n 100 || true
+		say "[VERIFY] ip6tables -t mangle -S (完整顺序)"
+		ip6tables -t mangle -S 2>/dev/null | sed 's/^/[mangle6-S] /' | head -n 120 || true
+	fi
+	say "[VERIFY] ip rules"
+	ip rule show | sed 's/^/[rule] /'
+	if [ -n "$ROUTE_TABLE" ]; then
+		say "[VERIFY] ip route table $ROUTE_TABLE"
+		ip route show table "$ROUTE_TABLE" | sed 's/^/[route] /'
+	fi
+	[ -n "$TPROXY_PORT" ] && ss -ulntp 2>/dev/null | grep -w ":${TPROXY_PORT}\b" | sed 's/^/[listen] /' || true
+	ok "验证输出完成（请检查上述输出）"
+}
+
+main() {
+	require_root
+	install_config
+	precheck
+	check_after_config
+	write_fw_include
+	register_fw_include
+	cleanup_old_service
+	verify
+	say "${GREEN}[SUCCESS] 安装完成。${NC}"
+	say "可通过编辑 $CONFIG_DST 后执行：/etc/init.d/firewall reload 使配置生效。"
+}
+
+main "$@" 
