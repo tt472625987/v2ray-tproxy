@@ -35,6 +35,8 @@ precheck() {
 	# 这里只提示，不强制退出
 	lsmod 2>/dev/null | grep -Eq '\bxt_TPROXY\b' || warn "未检测到 xt_TPROXY 模块，若规则失败请安装相应内核模块"
 	lsmod 2>/dev/null | grep -Eq '\bxt_socket\b' || warn "未检测到 xt_socket 模块，若规则失败请安装相应内核模块"
+	# 检查 ipset 支持
+	command -v ipset >/dev/null 2>&1 || warn "未检测到 ipset 命令，chinadns-ng 分流功能可能无法正常工作"
 	ok "依赖检查完成"
 }
 
@@ -76,13 +78,19 @@ install_config() {
 write_fw_include() {
 	cat > "$FW_INCLUDE" <<'EOF'
 #!/bin/sh
-# firewall include for v2ray-tproxy (iptables)
+# firewall include for v2ray-tproxy (iptables) with chinadns-ng integration
 
 CONFIG_FILE="/etc/v2ray-tproxy.conf"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
 # 统一 fwmark：优先使用 FW_MARK；若为空兼容旧 MARK_VALUE
 MARK="${FW_MARK:-$MARK_VALUE}"
+
+# chinadns-ng ipset 集合名称（与 chinadns-ng.conf 保持一致）
+CHN_IPSET4="chnip"
+CHN_IPSET6="chnip6"
+GFW_IPSET4="gfwip"
+GFW_IPSET6="gfwip6"
 
 # 清理旧规则（幂等）
 # 先从 PREROUTING 移除挂载点，再删除自定义链（IPv4）
@@ -126,15 +134,21 @@ iptables -t mangle -A DIVERT -j ACCEPT
 # 创建并填充 V2RAY_EXCLUDE（先排除再导流，IPv4）
 iptables -t mangle -N V2RAY_EXCLUDE 2>/dev/null || true
 iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null || true
+
+# 排除本地/内网地址
 for subnet in \
 	0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 \
 	169.254.0.0/16 172.16.0.0/12 \
 	224.0.0.0/4 240.0.0.0/4; do
 	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
 done
-	[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
+[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
 
-# 创建并填充 V2RAY（仅 TCP，UDP 可选，IPv4）
+# 排除 chinadns-ng 标记的国内IP（直连）
+# 注意：这里不需要再次排除，因为 chinadns-ng 已经在更高优先级处理了
+# 但为了保险起见，我们仍然检查并记录
+
+# 创建并填充 V2RAY（处理国外IP，IPv4）
 iptables -t mangle -N V2RAY 2>/dev/null || true
 iptables -t mangle -F V2RAY 2>/dev/null || true
 iptables -t mangle -A V2RAY_EXCLUDE -j V2RAY
@@ -153,8 +167,9 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 	iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 fi
 
-# 将 EXCLUDE 挂到最前（IPv4，V2RAY_EXCLUDE 内部跳转到 V2RAY）
-iptables -t mangle -I PREROUTING 1 -j V2RAY_EXCLUDE
+# 将 EXCLUDE 挂到 chinadns-ng 规则之后（IPv4）
+# chinadns-ng 规则优先级更高，会先处理
+iptables -t mangle -I PREROUTING 3 -j V2RAY_EXCLUDE
 
 # IPv6（可选，需 ENABLE_IPV6=1 且 ip6tables 可用）
 if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
@@ -167,24 +182,29 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 	ip6tables -t mangle -F DIVERT6 2>/dev/null || true
 	[ -n "$MARK" ] && ip6tables -t mangle -A DIVERT6 -j MARK --set-mark "$MARK"
 	ip6tables -t mangle -A DIVERT6 -j ACCEPT
+	
 	# 排除常见 IPv6 保留/本地段
 	for subnet6 in \
 		::1/128 fe80::/10 fc00::/7 ff00::/8; do
 		ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$subnet6" -j RETURN
 	done
 	[ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN
-ip6tables -t mangle -A V2RAY6_EXCLUDE -j V2RAY6
-# 可选日志
+	
+	ip6tables -t mangle -A V2RAY6_EXCLUDE -j V2RAY6
+	
+	# 可选日志
 	if [ -n "$LOG_PREFIX" ]; then
 		ip6tables -t mangle -A V2RAY6 -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
 	fi
+	
 	# TCP/UDP TPROXY（IPv6）
 	[ -n "$TPROXY_PORT" ] && [ -n "$MARK" ] && ip6tables -t mangle -A V2RAY6 -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 		ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	fi
-	# 挂载到 PREROUTING（IPv6）
-ip6tables -t mangle -I PREROUTING 1 -j V2RAY6_EXCLUDE
+	
+	# 挂载到 PREROUTING（IPv6，在 chinadns-ng 规则之后）
+	ip6tables -t mangle -I PREROUTING 3 -j V2RAY6_EXCLUDE
 fi
 
 # 策略路由：fwmark -> table（IPv4，IPv6 路由策略需另行按需配置）
@@ -239,7 +259,27 @@ verify() {
 	# 加载配置以便显示更准确的信息
 	[ -f "$CONFIG_DST" ] && . "$CONFIG_DST"
 	say "${BLUE}[VERIFY] 规则与路由状态...${NC}"
-	say "[VERIFY] iptables-save (grep V2RAY|DIVERT)"
+	
+	# 检查 chinadns-ng ipset 集合
+	say "[VERIFY] chinadns-ng ipset 集合状态:"
+	if command -v ipset >/dev/null 2>&1; then
+		for set in chnip chnip6 gfwip gfwip6; do
+			if ipset list "$set" >/dev/null 2>&1; then
+				count=$(ipset list "$set" | grep -c "^[0-9]" || echo "0")
+				say "  $set: 存在 ($count 个IP)"
+			else
+				say "  $set: 不存在"
+			fi
+		done
+	else
+		say "  ipset 命令不可用"
+	fi
+	
+	# 检查 chinadns-ng iptables 规则
+	say "[VERIFY] chinadns-ng iptables 规则:"
+	iptables -t mangle -L PREROUTING -n --line-numbers | grep -E 'CHINADNS|chinadns' | head -10 | sed 's/^/[chinadns] /' || say "  未找到 chinadns-ng 规则"
+	
+	say "[VERIFY] v2ray-tproxy iptables 规则:"
 	iptables-save 2>/dev/null | grep -E 'mangle|V2RAY|DIVERT' | sed 's/^/[iptables] /' | head -n 100 || true
 	say "[VERIFY] iptables -t mangle -S (完整顺序)"
 	iptables -t mangle -S 2>/dev/null | sed 's/^/[mangle-S] /' | head -n 120 || true
@@ -272,6 +312,8 @@ main() {
 	verify
 	say "${GREEN}[SUCCESS] 安装完成。${NC}"
 	say "可通过编辑 $CONFIG_DST 后执行：/etc/init.d/firewall reload 使配置生效。"
+	say "注意：请确保 chinadns-ng 已启动并创建了相应的 ipset 集合。"
+	say "建议：在 chinadns-ng 启动后，运行 /etc/chinadns-ng/ipset/ipset-persist.sh save 保存配置。"
 }
 
 main "$@" 
