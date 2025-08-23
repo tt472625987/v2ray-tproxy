@@ -164,6 +164,14 @@ iptables -t mangle -A V2RAY -p tcp -m socket -j DIVERT 2>/dev/null || true
 
 # UDP（可选）
 if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
+	# 先排除关键UDP端口，避免网络问题
+	if [ -n "${UDP_EXCLUDE_PORTS:-}" ]; then
+		IFS=',' read -ra PORTS <<< "$UDP_EXCLUDE_PORTS"
+		for port in "${PORTS[@]}"; do
+			[ -n "$port" ] && iptables -t mangle -A V2RAY -p udp --dport "$port" -j RETURN
+		done
+	fi
+	# 应用UDP TPROXY规则
 	iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 fi
 
@@ -200,6 +208,14 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 	# TCP/UDP TPROXY（IPv6）
 	[ -n "$TPROXY_PORT" ] && [ -n "$MARK" ] && ip6tables -t mangle -A V2RAY6 -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
+		# 先排除关键UDP端口，避免网络问题（IPv6）
+		if [ -n "${UDP_EXCLUDE_PORTS:-}" ]; then
+			IFS=',' read -ra PORTS <<< "$UDP_EXCLUDE_PORTS"
+			for port in "${PORTS[@]}"; do
+				[ -n "$port" ] && ip6tables -t mangle -A V2RAY6 -p udp --dport "$port" -j RETURN
+			done
+		fi
+		# 应用UDP TPROXY规则（IPv6）
 		ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	fi
 	
