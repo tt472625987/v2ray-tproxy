@@ -96,10 +96,14 @@ CONFIG_FILE="/etc/v2ray-tproxy.conf"
 MARK="${FW_MARK:-$MARK_VALUE}"
 
 # chinadns-ng ipset 集合名称（从配置文件读取，兼容默认值）
+# 确保在防火墙脚本中正确设置这些变量
 CHN_IPSET4="${CHN_IPSET4:-chnip}"
 CHN_IPSET6="${CHN_IPSET6:-chnip6}"
 GFW_IPSET4="${GFW_IPSET4:-gfwip}"
 GFW_IPSET6="${GFW_IPSET6:-gfwip6}"
+
+# 调试信息（可选）
+# echo "DEBUG: CHN_IPSET4=$CHN_IPSET4, CHN_IPSET6=$CHN_IPSET6"
 
 # 清理旧规则（幂等）
 # 先从 PREROUTING 移除挂载点，再删除自定义链（IPv4）
@@ -186,15 +190,23 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 	fi
 	
 	# UDP智能分流：国内IP直连，国外IP走代理
-	# 检查 ipset 集合是否存在，如果存在则应用智能分流
-	if command -v ipset >/dev/null 2>&1 && ipset list "$CHN_IPSET4" >/dev/null 2>&1; then
-		# 国内IP直连（不走代理）
-		iptables -t mangle -A V2RAY -p udp -m set --match-set "$CHN_IPSET4" dst -j RETURN
-		# 国外IP走代理
-		iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+	# 改进的条件判断：先检查ipset命令，再检查集合存在性
+	if command -v ipset >/dev/null 2>&1; then
+		# ipset命令可用，检查集合是否存在
+		if ipset list "$CHN_IPSET4" >/dev/null 2>&1; then
+			# 国内IP直连（不走代理）
+			iptables -t mangle -A V2RAY -p udp -m set --match-set "$CHN_IPSET4" dst -j RETURN
+			# 国外IP走代理
+			iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+			echo "INFO: UDP智能分流已启用，使用ipset集合 $CHN_IPSET4" >&2
+		else
+			# ipset命令可用但集合不存在，降级处理
+			echo "WARN: ipset 集合 $CHN_IPSET4 不存在，UDP 智能分流已降级为全代理模式" >&2
+			iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+		fi
 	else
-		# 如果 ipset 集合不存在，则所有 UDP 流量都走代理（降级处理）
-		warn "ipset 集合 $CHN_IPSET4 不存在，UDP 智能分流已降级为全代理模式"
+		# ipset命令不可用，降级处理
+		echo "WARN: ipset 命令不可用，UDP 智能分流已降级为全代理模式" >&2
 		iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	fi
 fi
@@ -245,15 +257,22 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		fi
 		
 		# UDP智能分流：国内IP直连，国外IP走代理（IPv6）
-		# 检查 ipset 集合是否存在，如果存在则应用智能分流
-		if command -v ipset >/dev/null 2>&1 && ipset list "$CHN_IPSET6" >/dev/null 2>&1; then
-			# 国内IP直连（不走代理）
-			ip6tables -t mangle -A V2RAY6 -p udp -m set --match-set "$CHN_IPSET6" dst -j RETURN
-			# 国外IP走代理
-			ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+		# 改进的条件判断：先检查ipset命令，再检查集合存在性
+		if command -v ipset >/dev/null 2>&1; then
+			# ipset命令可用，检查集合是否存在
+			if ipset list "$CHN_IPSET6" >/dev/null 2>&1; then
+				# 国内IP直连（不走代理）
+				ip6tables -t mangle -A V2RAY6 -p udp -m set --match-set "$CHN_IPSET6" dst -j RETURN
+				# 国外IP走代理
+				ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+			else
+				# ipset命令可用但集合不存在，降级处理
+				echo "WARN: ipset 集合 $CHN_IPSET6 不存在，IPv6 UDP 智能分流已降级为全代理模式" >&2
+				ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+			fi
 		else
-			# 如果 ipset 集合不存在，则所有 UDP 流量都走代理（降级处理）
-			warn "ipset 集合 $CHN_IPSET6 不存在，IPv6 UDP 智能分流已降级为全代理模式"
+			# ipset命令不可用，降级处理
+			echo "WARN: ipset 命令不可用，IPv6 UDP 智能分流已降级为全代理模式" >&2
 			ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 		fi
 	fi
