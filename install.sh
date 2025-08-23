@@ -175,7 +175,12 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 			[ -n "$port" ] && iptables -t mangle -A V2RAY -p udp --dport "$port" -j RETURN
 		done
 	fi
-	# 应用UDP TPROXY规则
+	
+	# UDP智能分流：国内IP直连，国外IP走代理
+	# 国内IP直连（不走代理）
+	iptables -t mangle -A V2RAY -p udp -m set --match-set chnip dst -j RETURN
+	
+	# 国外IP走代理
 	iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 fi
 
@@ -223,7 +228,12 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 				[ -n "$port" ] && ip6tables -t mangle -A V2RAY6 -p udp --dport "$port" -j RETURN
 			done
 		fi
-		# 应用UDP TPROXY规则（IPv6）
+		
+		# UDP智能分流：国内IP直连，国外IP走代理（IPv6）
+		# 国内IP直连（不走代理）
+		ip6tables -t mangle -A V2RAY6 -p udp -m set --match-set chnip6 dst -j RETURN
+		
+		# 国外IP走代理
 		ip6tables -t mangle -A V2RAY6 -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
 	fi
 	
