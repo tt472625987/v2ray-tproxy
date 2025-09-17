@@ -44,7 +44,7 @@ precheck() {
 		CHN_IPSET4="${CHN_IPSET4:-chnip}"
 		CHN_IPSET6="${CHN_IPSET6:-chnip6}"
 		ipset list "$CHN_IPSET4" >/dev/null 2>&1 || warn "ipset 集合 $CHN_IPSET4 不存在，UDP智能分流将失效"
-		[ "${ENABLE_IPV6:-0}" = "1" ] && ipset list "$CHN_IPSET6" >/dev/null 2>&1 || true
+		[ "${ENABLE_IPV6:-0}" = "1" ] && ipset -q list -n "$CHN_IPSET6" >/dev/null 2>&1 || true
 	fi
 	ok "依赖检查完成"
 }
@@ -150,16 +150,19 @@ iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null || true
 
 # 排除本地/内网地址
 for subnet in \
-	0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 \
-	169.254.0.0/16 172.16.0.0/12 \
-	224.0.0.0/4 240.0.0.0/4; do
+	0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
+	169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 \
+	198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
 	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
 done
 [ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
 
 # 排除 chinadns-ng 标记的国内IP（直连）
-# 注意：这里不需要再次排除，因为 chinadns-ng 已经在更高优先级处理了
-# 但为了保险起见，我们仍然检查并记录
+# 注意：为了彻底绕过 V2Ray，需在进入 V2RAY 链前直接 RETURN 国内 IP
+# 若系统已创建 $CHN_IPSET4（chinadns-ng），这里显式排除
+if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$CHN_IPSET4" >/dev/null 2>&1; then
+	iptables -t mangle -A V2RAY_EXCLUDE -m set --match-set "$CHN_IPSET4" dst -j RETURN
+fi
 
 # 创建并填充 V2RAY（处理国外IP，IPv4）
 iptables -t mangle -N V2RAY 2>/dev/null || true
@@ -193,7 +196,7 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 	# 改进的条件判断：先检查ipset命令，再检查集合存在性
 	if command -v ipset >/dev/null 2>&1; then
 		# ipset命令可用，检查集合是否存在
-		if ipset list "$CHN_IPSET4" >/dev/null 2>&1; then
+		if ipset -q list -n "$CHN_IPSET4" >/dev/null 2>&1; then
 			# 国内IP直连（不走代理）
 			iptables -t mangle -A V2RAY -p udp -m set --match-set "$CHN_IPSET4" dst -j RETURN
 			# 国外IP走代理
@@ -211,9 +214,8 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 	fi
 fi
 
-# 将 EXCLUDE 挂到 chinadns-ng 规则之后（IPv4）
-# chinadns-ng 规则优先级更高，会先处理
-iptables -t mangle -I PREROUTING 3 -j V2RAY_EXCLUDE
+# 将 EXCLUDE 挂到 PREROUTING 最前（IPv4），保证先排除再导流
+iptables -t mangle -I PREROUTING 1 -j V2RAY_EXCLUDE
 
 # IPv6（可选，需 ENABLE_IPV6=1 且 ip6tables 可用）
 if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
@@ -260,7 +262,7 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		# 改进的条件判断：先检查ipset命令，再检查集合存在性
 		if command -v ipset >/dev/null 2>&1; then
 			# ipset命令可用，检查集合是否存在
-			if ipset list "$CHN_IPSET6" >/dev/null 2>&1; then
+			if ipset -q list -n "$CHN_IPSET6" >/dev/null 2>&1; then
 				# 国内IP直连（不走代理）
 				ip6tables -t mangle -A V2RAY6 -p udp -m set --match-set "$CHN_IPSET6" dst -j RETURN
 				# 国外IP走代理
@@ -277,8 +279,8 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		fi
 	fi
 	
-	# 挂载到 PREROUTING（IPv6，在 chinadns-ng 规则之后）
-	ip6tables -t mangle -I PREROUTING 3 -j V2RAY6_EXCLUDE
+	# 挂载到 PREROUTING 最前（IPv6），保证先排除再导流
+	ip6tables -t mangle -I PREROUTING 1 -j V2RAY6_EXCLUDE
 fi
 
 # 策略路由：fwmark -> table（IPv4，IPv6 路由策略需另行按需配置）
