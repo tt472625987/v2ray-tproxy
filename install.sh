@@ -172,7 +172,11 @@ fi
 # 创建并填充 V2RAY（处理国外IP，IPv4）
 iptables -t mangle -N V2RAY 2>/dev/null || true
 iptables -t mangle -F V2RAY 2>/dev/null || true
-iptables -t mangle -A V2RAY_EXCLUDE -j V2RAY
+
+# 优化：未知IP默认直连（保守策略，避免误伤国内流量）
+# 只有明确在 gfwip 中的IP才走代理
+# 如需所有未知IP走代理，将下面这行的 RETURN 改为 V2RAY
+iptables -t mangle -A V2RAY_EXCLUDE -j RETURN
 
 # 可选：限速日志，避免刷屏（需要 LOG 目标支持）
 if [ -n "$LOG_PREFIX" ]; then
@@ -246,7 +250,13 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 		ip6tables -t mangle -A V2RAY6_EXCLUDE -m set --match-set "$GFW_IPSET6" dst -j V2RAY6
 	fi
 	
-	ip6tables -t mangle -A V2RAY6_EXCLUDE -j V2RAY6
+	# 排除 chinadns-ng 标记的国内IPv6（直连）
+	if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$CHN_IPSET6" >/dev/null 2>&1; then
+		ip6tables -t mangle -A V2RAY6_EXCLUDE -m set --match-set "$CHN_IPSET6" dst -j RETURN
+	fi
+	
+	# 优化：未知IPv6默认直连（与IPv4策略保持一致）
+	ip6tables -t mangle -A V2RAY6_EXCLUDE -j RETURN
 	
 	# 可选日志
 	if [ -n "$LOG_PREFIX" ]; then
