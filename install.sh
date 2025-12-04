@@ -97,7 +97,8 @@ MARK="${FW_MARK:-$MARK_VALUE}"
 
 # chinadns-ng ipset 集合名称（从配置文件读取，兼容默认值）
 # 确保在防火墙脚本中正确设置这些变量
-CHN_IPSET4="${CHN_IPSET4:-chnip}"
+# 使用 chnroute (完整IP段) 而不是 chnip (动态IP)
+CHN_IPSET4="${CHN_IPSET4:-chnroute}"
 CHN_IPSET6="${CHN_IPSET6:-chnip6}"
 GFW_IPSET4="${GFW_IPSET4:-gfwip}"
 GFW_IPSET6="${GFW_IPSET6:-gfwip6}"
@@ -185,7 +186,17 @@ fi
 
 # TCP 透明代理（优先基于 socket 匹配做旁路）
 iptables -t mangle -A V2RAY -p tcp -m socket -j DIVERT 2>/dev/null || true
-[ -n "$TPROXY_PORT" ] && [ -n "$MARK" ] && iptables -t mangle -A V2RAY -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+
+# TCP TPROXY 规则（兼容 nftables）
+if [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
+	# 尝试使用 iptables 添加 TPROXY 规则
+	if ! iptables -t mangle -A V2RAY -p tcp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT" 2>/dev/null; then
+		# 如果失败（nftables 环境），使用 nft 命令
+		if command -v nft >/dev/null 2>&1; then
+			nft add rule ip mangle V2RAY meta l4proto tcp tproxy to :$TPROXY_PORT meta mark set $MARK 2>/dev/null || true
+		fi
+	fi
+fi
 
 # UDP（可选）
 if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
@@ -208,18 +219,30 @@ if [ "${ENABLE_UDP:-0}" = "1" ] && [ -n "$TPROXY_PORT" ] && [ -n "$MARK" ]; then
 		if ipset -q list -n "$CHN_IPSET4" >/dev/null 2>&1; then
 			# 国内IP直连（不走代理）
 			iptables -t mangle -A V2RAY -p udp -m set --match-set "$CHN_IPSET4" dst -j RETURN
-			# 国外IP走代理
-			iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+			# 国外IP走代理（兼容 nftables）
+			if ! iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT" 2>/dev/null; then
+				if command -v nft >/dev/null 2>&1; then
+					nft add rule ip mangle V2RAY meta l4proto udp tproxy to :$TPROXY_PORT meta mark set $MARK 2>/dev/null || true
+				fi
+			fi
 			echo "INFO: UDP智能分流已启用，使用ipset集合 $CHN_IPSET4" >&2
 		else
 			# ipset命令可用但集合不存在，降级处理
 			echo "WARN: ipset 集合 $CHN_IPSET4 不存在，UDP 智能分流已降级为全代理模式" >&2
-			iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+			if ! iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT" 2>/dev/null; then
+				if command -v nft >/dev/null 2>&1; then
+					nft add rule ip mangle V2RAY meta l4proto udp tproxy to :$TPROXY_PORT meta mark set $MARK 2>/dev/null || true
+				fi
+			fi
 		fi
 	else
 		# ipset命令不可用，降级处理
 		echo "WARN: ipset 命令不可用，UDP 智能分流已降级为全代理模式" >&2
-		iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT"
+		if ! iptables -t mangle -A V2RAY -p udp -j TPROXY --tproxy-mark "$MARK" --on-port "$TPROXY_PORT" 2>/dev/null; then
+			if command -v nft >/dev/null 2>&1; then
+				nft add rule ip mangle V2RAY meta l4proto udp tproxy to :$TPROXY_PORT meta mark set $MARK 2>/dev/null || true
+			fi
+		fi
 	fi
 fi
 
