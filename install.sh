@@ -97,8 +97,8 @@ MARK="${FW_MARK:-$MARK_VALUE}"
 
 # chinadns-ng ipset 集合名称（从配置文件读取，兼容默认值）
 # 确保在防火墙脚本中正确设置这些变量
-# 使用 chnroute (完整IP段) 而不是 chnip (动态IP)
-CHN_IPSET4="${CHN_IPSET4:-chnroute}"
+# 使用 chnip (动态收集的国内IP) 进行匹配
+CHN_IPSET4="${CHN_IPSET4:-chnip}"
 CHN_IPSET6="${CHN_IPSET6:-chnip6}"
 GFW_IPSET4="${GFW_IPSET4:-gfwip}"
 GFW_IPSET6="${GFW_IPSET6:-gfwip6}"
