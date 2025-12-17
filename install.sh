@@ -184,6 +184,18 @@ if [ -n "$LOG_PREFIX" ]; then
 	iptables -t mangle -A V2RAY -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
 fi
 
+# TCP 端口排除（用于 RustDesk 等需要直连的服务）
+if [ -n "${TCP_EXCLUDE_PORTS:-}" ]; then
+	# 使用兼容性更好的方式解析端口列表
+	OLD_IFS="$IFS"
+	IFS=','
+	set -- $TCP_EXCLUDE_PORTS
+	IFS="$OLD_IFS"
+	for port in "$@"; do
+		[ -n "$port" ] && iptables -t mangle -A V2RAY -p tcp --dport "$port" -j RETURN
+	done
+fi
+
 # TCP 透明代理（优先基于 socket 匹配做旁路）
 iptables -t mangle -A V2RAY -p tcp -m socket -j DIVERT 2>/dev/null || true
 
@@ -284,6 +296,18 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 	# 可选日志
 	if [ -n "$LOG_PREFIX" ]; then
 		ip6tables -t mangle -A V2RAY6 -m limit --limit 10/min -j LOG --log-prefix "$LOG_PREFIX " --log-level 6 2>/dev/null || true
+	fi
+	
+	# TCP 端口排除（IPv6）
+	if [ -n "${TCP_EXCLUDE_PORTS:-}" ]; then
+		# 使用兼容性更好的方式解析端口列表
+		OLD_IFS="$IFS"
+		IFS=','
+		set -- $TCP_EXCLUDE_PORTS
+		IFS="$OLD_IFS"
+		for port in "$@"; do
+			[ -n "$port" ] && ip6tables -t mangle -A V2RAY6 -p tcp --dport "$port" -j RETURN
+		done
 	fi
 	
 	# TCP/UDP TPROXY（IPv6）
