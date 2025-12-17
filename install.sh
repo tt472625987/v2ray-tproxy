@@ -162,16 +162,15 @@ done
 iptables -t mangle -N V2RAY 2>/dev/null || true
 iptables -t mangle -F V2RAY 2>/dev/null || true
 
-# 在 CHN RETURN 之前，若命中 GFW_IPSET4，则直接跳到 V2RAY（强制代理）
-if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$GFW_IPSET4" >/dev/null 2>&1; then
-	iptables -t mangle -A V2RAY_EXCLUDE -m set --match-set "$GFW_IPSET4" dst -j V2RAY
-fi
-
-# 排除 chinadns-ng 标记的国内IP（直连）
-# 注意：为了彻底绕过 V2Ray，需在进入 V2RAY 链前直接 RETURN 国内 IP
-# 若系统已创建 $CHN_IPSET4（chinadns-ng），这里显式排除
+# 先检查 chnip（国内IP直连）- 必须在 gfwip 之前！
+# 这样即使 IP 同时存在于两个集合中，也会优先直连
 if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$CHN_IPSET4" >/dev/null 2>&1; then
 	iptables -t mangle -A V2RAY_EXCLUDE -m set --match-set "$CHN_IPSET4" dst -j RETURN
+fi
+
+# 后检查 gfwip（国外IP强制代理）
+if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$GFW_IPSET4" >/dev/null 2>&1; then
+	iptables -t mangle -A V2RAY_EXCLUDE -m set --match-set "$GFW_IPSET4" dst -j V2RAY
 fi
 
 # 优化：未知IP默认直连（保守策略，避免误伤国内流量）
@@ -280,14 +279,14 @@ if [ "${ENABLE_IPV6:-0}" = "1" ] && command -v ip6tables >/dev/null 2>&1; then
 	done
 	[ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY6_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN
 	
-	# 在 CHN RETURN 之前，若命中 GFW_IPSET6，则直接跳到 V2RAY6（强制代理）
-	if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$GFW_IPSET6" >/dev/null 2>&1; then
-		ip6tables -t mangle -A V2RAY6_EXCLUDE -m set --match-set "$GFW_IPSET6" dst -j V2RAY6
-	fi
-	
-	# 排除 chinadns-ng 标记的国内IPv6（直连）
+	# 先检查 chnip6（国内IPv6直连）- 必须在 gfwip6 之前！
 	if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$CHN_IPSET6" >/dev/null 2>&1; then
 		ip6tables -t mangle -A V2RAY6_EXCLUDE -m set --match-set "$CHN_IPSET6" dst -j RETURN
+	fi
+	
+	# 后检查 gfwip6（国外IPv6强制代理）
+	if command -v ipset >/dev/null 2>&1 && ipset -q list -n "$GFW_IPSET6" >/dev/null 2>&1; then
+		ip6tables -t mangle -A V2RAY6_EXCLUDE -m set --match-set "$GFW_IPSET6" dst -j V2RAY6
 	fi
 	
 	# 优化：未知IPv6默认直连（与IPv4策略保持一致）
