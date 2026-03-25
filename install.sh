@@ -149,6 +149,10 @@ iptables -t mangle -A DIVERT -j ACCEPT
 iptables -t mangle -N V2RAY_EXCLUDE 2>/dev/null || true
 iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null || true
 
+# 优先排除 LOCAL_SUBNET（避免被后面的大网段覆盖）
+[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
+[ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN 2>/dev/null || true
+
 # 排除本地/内网地址
 for subnet in \
 	0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
@@ -156,7 +160,6 @@ for subnet in \
 	198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
 	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
 done
-[ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
 
 # 创建并填充 V2RAY 链（必须先创建，后面的规则才能跳转到这里）
 iptables -t mangle -N V2RAY 2>/dev/null || true
