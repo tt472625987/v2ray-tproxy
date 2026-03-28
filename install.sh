@@ -153,10 +153,10 @@ iptables -t mangle -F V2RAY_EXCLUDE 2>/dev/null || true
 [ -n "$LOCAL_SUBNET" ] && iptables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET" -j RETURN
 [ -n "$LOCAL_SUBNET6" ] && ip6tables -t mangle -A V2RAY_EXCLUDE -d "$LOCAL_SUBNET6" -j RETURN 2>/dev/null || true
 
-# 排除本地/内网地址
+# 排除本地/内网地址（移除 192.168.0.0/16，让内网设备可以走代理）
 for subnet in \
 	0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
-	169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 \
+	169.254.0.0/16 172.16.0.0/12 \
 	198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
 	iptables -t mangle -A V2RAY_EXCLUDE -d "$subnet" -j RETURN
 done
